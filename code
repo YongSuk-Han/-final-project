@@ -1,0 +1,273 @@
+import cv2
+import mediapipe as mp
+import math                   # 코드 구현에 필요한 라이브러리 import.
+import numpy as np
+import os
+import time
+import torch
+
+
+def distance(p1, p2): # 두 점(p1,p2) 사이의 거리를 계산한다.
+    return (((p1[:2] - p2[:2]) ** 2).sum()) ** 0.5 # Euclidean Distance를 return.
+
+
+def eye_aspect_ratio(landmarks, eye): # 눈의 너비와 높이의 비율(ratio)를 계산한다.
+    N1 = distance(landmarks[eye[1][0]], landmarks[eye[1][1]])
+    N2 = distance(landmarks[eye[2][0]], landmarks[eye[2][1]])
+    N3 = distance(landmarks[eye[3][0]], landmarks[eye[3][1]])
+    D = distance(landmarks[eye[0][0]], landmarks[eye[0][1]])
+    return (N1 + N2 + N3) / (3 * D)
+
+
+def eye_feature(landmarks): # 두 눈의 eye_aspect_ratio의 평균으로 눈의 특징을 계산한다.
+    return (eye_aspect_ratio(landmarks, left_eye) + \
+            eye_aspect_ratio(landmarks, right_eye)) / 2
+
+
+def mouth_feature(landmarks): # 입의 너비와 높이의 비율(ratio)를 계산한다.
+    N1 = distance(landmarks[mouth[1][0]], landmarks[mouth[1][1]])
+    N2 = distance(landmarks[mouth[2][0]], landmarks[mouth[2][1]])
+    N3 = distance(landmarks[mouth[3][0]], landmarks[mouth[3][1]])
+    D = distance(landmarks[mouth[0][0]], landmarks[mouth[0][1]])
+    return (N1 + N2 + N3) / (3 * D)
+
+
+def pupil_circularity(landmarks, eye):
+# Mediapipe Facemesh model의 Face Landmark를 이용해 pupil circularity(동공 원형도)를 계산한다.
+    perimeter = distance(landmarks[eye[0][0]], landmarks[eye[1][0]]) + \
+                distance(landmarks[eye[1][0]], landmarks[eye[2][0]]) + \
+                distance(landmarks[eye[2][0]], landmarks[eye[3][0]]) + \
+                distance(landmarks[eye[3][0]], landmarks[eye[0][1]]) + \
+                distance(landmarks[eye[0][1]], landmarks[eye[3][1]]) + \
+                distance(landmarks[eye[3][1]], landmarks[eye[2][1]]) + \
+                distance(landmarks[eye[2][1]], landmarks[eye[1][1]]) + \
+                distance(landmarks[eye[1][1]], landmarks[eye[0][0]])
+    area = math.pi * ((distance(landmarks[eye[1][0]], landmarks[eye[3][1]]) * 0.5) ** 2)
+    return (4 * math.pi * area) / (perimeter ** 2)
+
+
+def pupil_feature(landmarks):
+# 두 눈의 동공 원형도(pupil circularity)의 평균으로 동공 형상(pupil feature)를 계산한다.
+    return (pupil_circularity(landmarks, left_eye) + \
+            pupil_circularity(landmarks, right_eye)) / 2
+
+
+def run_face_mp(image):
+# input image를 이용해 Feature 1 (Eye), Feature 2 (Mouth), Feature 3 (Pupil),
+# Feature 4 (Combined eye and mouth feature)의 4가지 feature와 drawing image를 return.
+    image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB) # imgae의 좌우 반전 및 BGR을 RGB로 변환.
+    image.flags.writeable = False
+    
+    results1 = face_mesh.process(image) # Face mesh process
+    results2 = face_detection.process(image) # Face detection process
+
+    image.flags.writeable = True
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+
+    if results2.detections: # image에 face detection 박스 처리
+        for detection in results2.detections:
+            mp_drawing.draw_detection(image, detection)
+        cv2.putText(image,'normal',(0,30),cv2.FONT_HERSHEY_SIMPLEX,1,(0,255,0),3,cv2.LINE_4,False)
+    else:
+        cv2.putText(image,'abnormal',(0,30),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),3,cv2.LINE_4,False)
+
+
+    if results1.multi_face_landmarks: # image의 multi_face_landmark를 이용해 feature추출 및 face mesh 생성
+        landmarks_positions = []
+        # image안에 face만 있다고 가정.
+        for _, data_point in enumerate(results.multi_face_landmarks[0].landmark):
+            landmarks_positions.append(
+                [data_point.x, data_point.y, data_point.z])  # normalized landmark positions 저장.
+        landmarks_positions = np.array(landmarks_positions)
+        landmarks_positions[:, 0] *= image.shape[1]
+        landmarks_positions[:, 1] *= image.shape[0]
+
+        # image에 face mesh 그리기.
+        for face_landmarks in results.multi_face_landmarks:
+            mp_drawing.draw_landmarks(
+                image=image,
+                landmark_list=face_landmarks,
+                connections=mp_face_mesh.FACE_CONNECTIONS,
+                landmark_drawing_spec=drawing_spec,
+                connection_drawing_spec=drawing_spec)
+
+        ear = eye_feature(landmarks_positions) # eye feature 추출
+        mar = mouth_feature(landmarks_positions) # mouth feature 추출
+        puc = pupil_feature(landmarks_positions) # pupil feature 추출
+        moe = mar / ear 
+    else:
+        ear = -1000
+        mar = -1000
+        puc = -1000
+        moe = -1000
+
+    return ear, mar, puc, moe, image
+
+
+def calibrate(calib_frame_count=25): # image의 중간 지점에서 특징들을 추출한다. Default vale = 25
+	                             # feature 1,2,3,4의 Normalization을 return.
+	                     
+
+    ears = [] # 각 feature가 들어갈 비어있는 list 선언.
+    mars = []
+    pucs = []
+    moes = []
+
+    cap = cv2.VideoCapture(0)
+    while cap.isOpened():
+        success, image = cap.read()
+        if not success:
+            print("Ignoring empty camera frame.")
+            continue
+
+        ear, mar, puc, moe, image = run_face_mp(image)
+        if ear != -1000:
+            ears.append(ear)
+            mars.append(mar)
+            pucs.append(puc)
+            moes.append(moe)
+
+        cv2.putText(image, "Calibration", (int(0.02 * image.shape[1]), int(0.14 * image.shape[0])),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0), 2)
+        cv2.imshow('MediaPipe FaceMesh', image)
+        if cv2.waitKey(5) & 0xFF == ord("q"):
+            break
+        if len(ears) >= calib_frame_count: # ears의 list 길이가 25보다 크면 break
+            break
+
+    cv2.destroyAllWindows()
+    cap.release()
+
+    # 추출한 feature를 numpy 배열로 바꿔주고, normalize후 return.
+    ears = np.array(ears)
+    mars = np.array(mars)
+    pucs = np.array(pucs)
+    moes = np.array(moes)
+    return [ears.mean(), ears.std()], [mars.mean(), mars.std()], \
+           [pucs.mean(), pucs.std()], [moes.mean(), moes.std()]
+
+
+def get_classification(input_data): # input data로 20 frames feature list 나타낸다.
+	                            # input data를 통해 운전자의 상태(정상, 졸음운전)를 판단.
+    model_input = []
+    model_input.append(input_data[:5])
+    model_input.append(input_data[3:8])
+    model_input.append(input_data[6:11])
+    model_input.append(input_data[9:14])
+    model_input.append(input_data[12:17])
+    model_input.append(input_data[15:])
+    model_input = torch.FloatTensor(np.array(model_input))
+    preds = torch.sigmoid(model(model_input)).gt(0.5).int().data.numpy()
+    return int(preds.sum() >= 5)
+
+
+def infer(ears_norm, mars_norm, pucs_norm, moes_norm): # calibrate 후에 얻은 Normalization value를 받는다.
+    ear_main = 0
+    mar_main = 0
+    puc_main = 0
+    moe_main = 0
+    decay = 0.9  # feature values의 noise를 smooth하게 만들기 위해 decay 사용.
+
+    label = None
+
+    input_data = []
+    frame_before_run = 0
+
+    cap = cv2.VideoCapture(0)
+    while cap.isOpened():
+        success, image = cap.read()
+        if not success:
+            print("Ignoring empty camera frame.")
+            continue
+
+        ear, mar, puc, moe, image = run_face_mp(image)
+        if ear != -1000:
+            ear = (ear - ears_norm[0]) / ears_norm[1]
+            mar = (mar - mars_norm[0]) / mars_norm[1]
+            puc = (puc - pucs_norm[0]) / pucs_norm[1]
+            moe = (moe - moes_norm[0]) / moes_norm[1]
+            if ear_main == -1000:
+                ear_main = ear
+                mar_main = mar
+                puc_main = puc
+                moe_main = moe
+            else:
+                ear_main = ear_main * decay + (1 - decay) * ear
+                mar_main = mar_main * decay + (1 - decay) * mar
+                puc_main = puc_main * decay + (1 - decay) * puc
+                moe_main = moe_main * decay + (1 - decay) * moe
+        else:
+            ear_main = -1000
+            mar_main = -1000
+            puc_main = -1000
+            moe_main = -1000
+
+        if len(input_data) == 20:
+            input_data.pop(0)
+        input_data.append([ear_main, mar_main, puc_main, moe_main])
+
+        frame_before_run += 1
+        if frame_before_run >= 15 and len(input_data) == 20:
+            frame_before_run = 0
+            label = get_classification(input_data)
+
+        cv2.putText(image, "EAR: %.2f" % (ear_main), (int(0.02 * image.shape[1]), int(0.07 * image.shape[0])),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        cv2.putText(image, "MAR: %.2f" % (mar_main), (int(0.27 * image.shape[1]), int(0.07 * image.shape[0])),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        cv2.putText(image, "PUC: %.2f" % (puc_main), (int(0.52 * image.shape[1]), int(0.07 * image.shape[0])),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        cv2.putText(image, "MOE: %.2f" % (moe_main), (int(0.77 * image.shape[1]), int(0.07 * image.shape[0])),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        if label is not None: # lable의 값이 0이면 correct driving, 아니면 drowsy driving
+            if label == 0:
+                color = (0, 255, 0)
+            else:
+                color = (0, 0, 255)
+            cv2.putText(image, "%s" % (states[label]), (int(0.02 * image.shape[1]), int(0.2 * image.shape[0])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 2)
+
+        cv2.imshow('MediaPipe FaceMesh', image) # Driver status monitoring을 window창으로 출력.
+        if cv2.waitKey(5) & 0xFF == ord("q"):
+            break
+
+    cv2.destroyAllWindows()
+    cap.release()
+
+
+right_eye = [[33, 133], [160, 144], [159, 145], [158, 153]]  # right eye landmark positions
+left_eye = [[263, 362], [387, 373], [386, 374], [385, 380]]  # left eye landmark positions
+mouth = [[61, 291], [39, 181], [0, 17], [269, 405]]  # mouth landmark coordinates
+states = ['correct driving', 'drowsy driving'] # 운전자의 주행 state 표시.
+
+# Mediapipe의 face mesh solution 사용 및 속성 설정
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    min_detection_confidence=0.3, min_tracking_confidence=0.8)
+
+# Mediapipe의 face detection solution 사용 및 속성 설정
+mp_face_detection = mp.solutions.face_detection
+face_detection = mp_face_detection.FaceDetection(
+    min_detection_confidence = 0.5)
+
+# Drawing spec 설정
+mp_drawing = mp.solutions.drawing_utils
+drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
+
+# LSTM 모델을 사용하여 운전자 상태를 감지한다.
+model_lstm_path = '\\Users\\user\\Drowsiness-Detection-Mediapipe\\models\\clf_lstm_jit6.pth'
+model = torch.jit.load(model_lstm_path)
+model.eval()
+
+print('Starting calibration. Please be in neutral state') # calibrate 함수를 이용해 feature 추출.
+time.sleep(1)
+ears_norm, mars_norm, pucs_norm, moes_norm = calibrate()
+
+print('Starting main application') # 운전자 상태 monitoring
+time.sleep(1)
+infer(ears_norm, mars_norm, pucs_norm, moes_norm)
+
+
+face_detection.close() # face detection 종료.
+face_mesh.close() # face mesh 종료.
